@@ -46,3 +46,5 @@ src/hubmap_translation/addl_index_transformations/portal/cache/*.jsonld
 
 # INI files
 **/.ini
+
+**/.csv

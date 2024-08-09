@@ -54,7 +54,7 @@ def getindexurls(myconfig: cfg.myConfigParser, urlbase: str) -> list:
     listret = []
     dictindex = myconfig.get_section(section='indexes')
     for key in dictindex:
-        listret.append(urlbase + dictindex[key])
+        listret.append(urlbase + dictindex[key]+'/_field_caps?fields=*')
 
     return listret
 
@@ -137,7 +137,6 @@ dfindexattributes = pd.DataFrame(columns=colnames)
 # 2. Extract attribute information from response. Write to dataframe.
 for u in urls:
     # Obtain a list of tuples of searchable attributes for the index.
-    print(u)
     listattributes = getsearchablefields(u)
     # Add the list for this index to the Data Frame.
     dfu = pd.DataFrame.from_records(listattributes, columns=colnames)
@@ -148,4 +147,4 @@ dfindexattributes = dfindexattributes.sort_values(
     by=['index', 'ancestor_level_3', 'ancestor_level_2', 'ancestor_level_1', 'attribute_key'])
 
 # Export dataframe to CSV.
-print(dfindexattributes)
+dfindexattributes.to_csv('index_attributes.csv',index=False)
