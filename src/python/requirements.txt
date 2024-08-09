@@ -1,0 +1,4 @@
+# for analysis of tabular data
+pandas==2.2.2
+# for working with APIs
+requests==2.32.3
