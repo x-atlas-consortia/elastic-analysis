@@ -1,0 +1,9 @@
+# Elastic Search configuration
+base_url=url
+
+[URL]
+# URLs for indexes
+consortium_entities=hm_stage_rc_consortium_entities
+consortium_portal=hm_stage_rc_consortium_portal
+public_entities=hm_stage_rc_public_entities
+public_portal=hm_stage_rc_public_portal

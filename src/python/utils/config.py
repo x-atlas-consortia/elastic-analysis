@@ -7,7 +7,7 @@ from configparser import ConfigParser,ExtendedInterpolation
 import configparser
 import os
 
-class ubkgConfigParser:
+class myConfigParser:
     def __init__(self, path: str, case_sensitive: bool = False):
         # Reads and validates the configuration file.
 
