@@ -4,22 +4,6 @@
 # August 2024
 # J. Alan Simmons
 
-# Characterize ElasticSearch indexes used in HuBMAP (and possibly SenNet).
-# The documents indexed in ElasticSearch are JSON files that can nest up to 4 levels.
-
-# If a document is associated with an element in the Entity Provenance Hierarchy, the index will include
-# information that helps to locate the document in the hierarchy.
-
-# The HuBMAP Entity Provenance (poly)Hierarchy organizes information in ways that include:
-# 1. Donor -> Sample -> Dataset
-# 2. Collection -> Dataset
-
-# The Entity Provenance elements relate with "ancestor" and "descendant" relationships.
-
-# Elements can contain other elements of the same entity type hierarchically, to represent division or derivation--e.g.,
-# 1. A Sample of type organ can be the ancestor of a Sample of type organ_piece.
-# 2. A primary Dataset can be the ancestor of a derived Dataset entity.
-
 # AUTHORIZATION
 # The IP for the machine running this script must be white-listed for the ElasticSearch server.
 
@@ -28,10 +12,13 @@
 import requests
 import pandas as pd
 import os
+import sys
 
-# Extraction module
+# Utilties
 import utils.config as cfg
 
+# Progress bar
+from tqdm import tqdm
 
 def getconfig() -> cfg.myConfigParser:
     # Read list of ElasticSearch API endpoint URLs from INI file.
@@ -40,28 +27,28 @@ def getconfig() -> cfg.myConfigParser:
     return cfg.myConfigParser(cfgfile)
 
 
-def getindexurls(myconfig: cfg.myConfigParser, urlbase: str) -> list:
+def getindexids(myconfig: cfg.myConfigParser) -> list:
     """
-    Obtains URLs for searching ElasticSearch indexes.
+    Obtains names of ElasticSearch indexes.
 
     :param myconfig: instance of a myConfigParser class representing the configuration ini file.
-    :param urlbase: base URL for ElasticSearch endpoints.
 
-    :return: list of URLs
+    :return: list of index names
     """
 
     # Obtain list of indexes.
     listret = []
     dictindex = myconfig.get_section(section='indexes')
     for key in dictindex:
-        listret.append(urlbase + dictindex[key]+'/_field_caps?fields=*')
+        # listret.append(urlbase + dictindex[key]+'/_field_caps?fields=*')
+        listret.append(dictindex[key])
 
     return listret
 
 
-def getsearchablefields(url):
+def getattributes(idx: str, urlbase: str):
     """
-    Returns a list of tuples for searchable attributes.
+    Returns a list of tuples for attributes.
     Assumes that the url corresponds to one ElasticSearch index.
 
     Returns a list of tuples that will be converted to a DataFrame.
@@ -78,13 +65,15 @@ def getsearchablefields(url):
     (<index>, immediate_ancestors.metadata.metadata.rnaseq_assay_input_value.keyword, keyword,
     rnaseq_assay_input_value, metadata, metadata,immediate_ancestors).
 
-    :param url: index search URL
+    :param idx: name of the index
+    :param urlbase: URL base of the ElasticSearch query
     """
 
     listret = []
 
-    # Obtain index data.
+    # Obtain index data using a field capacity query.
     headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
+    url = f"{urlbase}/{idx}/_field_caps?fields=*"
     response = requests.get(url, headers=headers)
 
     if response.status_code == 200:
@@ -109,42 +98,209 @@ def getsearchablefields(url):
             # Pad the list with blanks to the 4th level.
             for i in range(len(listpath) - 1, 3):
                 listpath.append('')
-            ret = [index, attributename, indextype] + listpath
-            if searchable and not isprivate:
-                listret.append(tuple(ret))
+
+            # Concatenate the padded path list to the other variables and convert to a tuple.
+            ret = [index, attributename, indextype, isprivate, searchable] + listpath
+            listret.append(tuple(ret))
 
     return listret
 
 
+def buildattributelist(urlbase: str, indexes: list):
+    """
+    Characterize ElasticSearch indexes used in HuBMAP (and possibly SenNet).
+    The documents indexed in ElasticSearch are JSON files that can nest up to 4 levels.
+
+    If a document is associated with an element in the Entity Provenance Hierarchy, the index will include
+    information that helps to locate the document in the hierarchy.
+
+    The HuBMAP Entity Provenance (poly)Hierarchy organizes information in ways that include:
+    1. Donor -> Sample -> Dataset
+    2. Collection -> Dataset
+
+    The Entity Provenance elements relate with "ancestor" and "descendant" relationships.
+
+    Elements can contain other elements of the same entity type hierarchically, to represent division or
+    derivation--e.g.,
+    1. A Sample of type organ can be the ancestor of a Sample of type organ_piece.
+    2. A primary Dataset can be the ancestor of a derived Dataset entity.
+
+    Build set of index-attribute mappings based on field capacity queries to the ElasticSearch API.
+
+    :param urlbase: base URL for ElasticSearch queries, obtained from a config file.
+    :param indexes: list of indexes to search
+    """
+
+    # Columns for output.
+    colnames = ['index', 'attribute', 'index_type', 'private', 'searchable', 'attribute_key', 'ancestor_level_1',
+                'ancestor_level_2', 'ancestor_level_3']
+
+    dfindexattributes = pd.DataFrame(columns=colnames)
+
+    # Obtain and analyze the attributes of each index.
+    for idxid in indexes:
+        # Execute the endpoint and btain a list of tuples of attributes for the index.
+        listattributes = getattributes(idx=idxid, urlbase=urlbase)
+        # Add the list for this index to the Data Frame.
+        dfu = pd.DataFrame.from_records(listattributes, columns=colnames)
+        dfindexattributes = pd.concat([dfindexattributes, dfu])
+
+    # Sort the DataFrame.
+    dfindexattributes = dfindexattributes.sort_values(
+        by=['index', 'ancestor_level_3', 'ancestor_level_2', 'ancestor_level_1', 'attribute_key'])
+
+    # Export dataframe to CSV.
+    dfindexattributes.to_csv('index_attributes.csv', index=False)
+
+def getkeysizes(es_idx: str, hmid: str, key_path: str, obj_key, obj) -> list:
+
+    """
+    Returns sizes of all elements in a value of a dictionary. Recursively calls itself to obtain details
+    on nested objects--e.g., for a list of dictionaries, returns the size of both the list
+    and each dictionary in the list.
+
+    :param es_idx: ElasticSearch index.
+    :param hmid: HuBMAP ID of for the hit that contains obj.
+    :param key_path: hierarchical representation of the keys for the object that contained the key, similar
+    to the attribute path in an ElasticSearch index.
+    :param obj: The value for a key in a dictionary, of variable type.
+    :param obj_key: key name
+    :return: a list of tuples per column schema:
+    column  description
+    0       ElasticSearch index
+    1       HMID of the hit that contains the element
+    2       key path to the element. If the element is an element of a list, then the key path includes the
+            list index.
+    3       size of the element, in bytes.
+    """
+    listsizes = []
+
+    fullpath = key_path + '.' + obj_key
+    # Size the object.
+    listsizes.append((es_idx, hmid, fullpath, sys.getsizeof(obj)))
+
+    # Size the contents of the object.
+    if type(obj) is list:
+        for o in obj:
+            keypath_list = f'{fullpath}[{obj.index(o)}]'
+            listobjsizes = getkeysizes(es_idx=es_idx, hmid=hmid, key_path=keypath_list, obj_key=obj_key,obj=o)
+            listsizes = listsizes + listobjsizes
+    elif type(obj) is dict:
+        for key in obj:
+            keypath_nest = fullpath + '.' + key
+            listobjsizes = getkeysizes(es_idx=es_idx, hmid=hmid, key_path=keypath_nest, obj_key=key, obj=obj[key])
+            listsizes = listsizes + listobjsizes
+
+    return listsizes
+
+def gethitsizes(es_idx:str, doc_hit: dict) -> list:
+    """
+    Returns the sizes of every non-private attribute in a document.
+    :param es_idx: An ElasticSearch index.
+    :param doc_hit: A dict that corresponds to a "hit" in the response to a _search endpoint.
+    :return: A list of sizes by attribute
+    """
+
+    source = doc_hit.get("_source")
+    hmid = source.get("hubmap_id")
+    listattributesizes = []
+    # Size of the hit itself.
+    listattributesizes.append((es_idx, hmid, "_source",sys.getsizeof(source)))
+
+    for key in source:
+        # Size of each nested element in the hit.
+        listkeysizes = getkeysizes(es_idx=es_idx, hmid=hmid, key_path="_source", obj_key=key, obj=source[key])
+        listattributesizes = listattributesizes + listkeysizes
+
+    return listattributesizes
+
+def getattributesizes(urlbase: str, indexes: list):
+    """
+    Obtains the byte sizes of every attribute in all documents in ElasticSearch.
+    :param urlbase: base URL for ElasticSearch, obtained from a config file.
+    :param indexes: list of indexes, obtained from a config file.
+
+    This method use "search_after" methodology to page through all the documents in ElasticSearch.
+
+    """
+
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    reqbody = {"query": {"match_all": {}},"sort": [{"_id": "asc"}]}
+
+    # Columns for output.
+    colnames = ["index","hmid","attribute","size"]
+    dfattributesizes = pd.DataFrame(columns=colnames)
+
+    for idx in indexes:
+
+        ihit = 0
+        print(f'Sizing documents in index: {idx}')
+        # Initialize count of hits from search response to default.
+        numhits = 10
+
+        # Get the total number of hits for the progress bar.
+        url = f"{urlbase}{idx}/_search"
+        response = requests.post(url=url, headers=headers, json=reqbody)
+        if response.status_code == 200:
+            rjson = response.json()
+            totalhits = rjson.get("hits").get("total").get("value")
+        else:
+            print(f'Error: {response.status_code}')
+            exit(1)
+
+        # Loop through pages of results until no more hits are returned.
+        with tqdm(total=totalhits) as pbar:
+            while numhits > 0:# and ihit == 0: # itest for debug to limit # hits
+                url = f"{urlbase}{idx}/_search"
+                response = requests.post(url=url, headers=headers, json=reqbody)
+                if response.status_code != 200:
+                    print(f'Error searching :{response.status_code}')
+                else:
+                    rjson = response.json()
+                    hits = rjson.get("hits").get("hits")
+                    numhits = len(hits)
+
+                    # Obtain size of every attribute in the hit.
+                    hitsizes = []
+                    for hit in hits:
+                        ihit = ihit + 1
+                        hitsizes = gethitsizes(es_idx=idx, doc_hit=hit)
+                        # Add the list of sizes for this hit to the Data Frame.
+                        dfhit = pd.DataFrame.from_records(hitsizes, columns=colnames)
+                        dfattributesizes = pd.concat([dfattributesizes, dfhit])
+                         # Advance the progress bar.
+                        pbar.update(1)
+
+                    if numhits == 0:
+                        # Re-initialize the request body.
+                        del reqbody["search_after"]
+                    else:
+                        # Build pagination for searches after the first--i.e., a search_after key.
+                        last_hit = hits[numhits-1]
+                        last_id = last_hit.get("sort")[0]
+                        list_search_after = []
+                        list_search_after.append(last_id)
+                        reqbody["search_after"] = list_search_after
+
+    # Export dataframe to CSV.
+    print('Writing out attribute_sizes.csv')
+    dfattributesizes.to_csv('attribute_sizes.csv',index=False,mode='w')
+
 # ----------------
 # MAIN
+
 
 # Open INI file.
 elastic_config = getconfig()
 
 # Obtain base URL for ElasticSearch endpoints.
 baseurl = elastic_config.get_value(section='Elastic', key='baseurl')
+
 # Obtain list of index URLs.
-urls = getindexurls(myconfig=elastic_config, urlbase=baseurl)
+indexids = getindexids(myconfig=elastic_config)
 
-# Build set of index-attribute mappings based on field capacity queries to the Elastic Search API.
-colnames = ['index','attribute','index_type','attribute_key','ancestor_level_1','ancestor_level_2','ancestor_level_3']
+#print('Building attribute list...')
+#buildattributelist(urlbase=baseurl, indexes=indexids)
 
-dfindexattributes = pd.DataFrame(columns=colnames)
-
-# For each index,
-# 1. Execute the endpoint.
-# 2. Extract attribute information from response. Write to dataframe.
-for u in urls:
-    # Obtain a list of tuples of searchable attributes for the index.
-    listattributes = getsearchablefields(u)
-    # Add the list for this index to the Data Frame.
-    dfu = pd.DataFrame.from_records(listattributes, columns=colnames)
-    dfindexattributes = pd.concat([dfindexattributes, dfu])
-
-# Sort the DataFrame.
-dfindexattributes = dfindexattributes.sort_values(
-    by=['index', 'ancestor_level_3', 'ancestor_level_2', 'ancestor_level_1', 'attribute_key'])
-
-# Export dataframe to CSV.
-dfindexattributes.to_csv('index_attributes.csv',index=False)
+print('Obtaining size statistics on documents....')
+getattributesizes(urlbase=baseurl,indexes=indexids)
