@@ -13,6 +13,7 @@ import requests
 import pandas as pd
 import os
 import sys
+import json
 
 # Utilties
 import utils.config as cfg
@@ -152,6 +153,20 @@ def buildattributelist(urlbase: str, indexes: list):
     # Export dataframe to CSV.
     dfindexattributes.to_csv('index_attributes.csv', index=False)
 
+def get_byte_size(obj) -> int:
+
+    """
+    Calculates the byte size of an element of a JSON  by converting it to a string.
+    :param obj: an element in a JSON --e.g., a string, list, etc.
+    :return:
+    """
+
+    if type(obj) is dict:
+        s = json.dumps(obj)
+    else:
+        s = str(obj)
+    return len(s.encode('utf-8'))
+
 def getkeysizes(es_idx: str, hmid: str, key_path: str, obj_key, obj) -> list:
 
     """
@@ -177,7 +192,9 @@ def getkeysizes(es_idx: str, hmid: str, key_path: str, obj_key, obj) -> list:
 
     fullpath = key_path + '.' + obj_key
     # Size the object.
-    listsizes.append((es_idx, hmid, fullpath, sys.getsizeof(obj)))
+    typ = str(type(obj))
+    typ = typ.strip(f"<class ").strip(f"'>")
+    listsizes.append((es_idx, hmid, fullpath, typ, get_byte_size(obj)))
 
     # Size the contents of the object.
     if type(obj) is list:
@@ -205,7 +222,7 @@ def gethitsizes(es_idx:str, doc_hit: dict) -> list:
     hmid = source.get("hubmap_id")
     listattributesizes = []
     # Size of the hit itself.
-    listattributesizes.append((es_idx, hmid, "_source",sys.getsizeof(source)))
+    listattributesizes.append((es_idx, hmid, "_source","dict",get_byte_size(source)))
 
     for key in source:
         # Size of each nested element in the hit.
@@ -214,7 +231,7 @@ def gethitsizes(es_idx:str, doc_hit: dict) -> list:
 
     return listattributesizes
 
-def getattributesizes(urlbase: str, indexes: list):
+def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
     """
     Obtains the byte sizes of every attribute in all documents in ElasticSearch.
     :param urlbase: base URL for ElasticSearch, obtained from a config file.
@@ -224,11 +241,13 @@ def getattributesizes(urlbase: str, indexes: list):
 
     """
 
+    DEBUGHITNUM = 5000  # test for debug to limit # hits
+
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     reqbody = {"query": {"match_all": {}},"sort": [{"_id": "asc"}]}
 
     # Columns for output.
-    colnames = ["index","hmid","attribute","size"]
+    colnames = ["index","hmid","attribute","type","size"]
     dfattributesizes = pd.DataFrame(columns=colnames)
 
     for idx in indexes:
@@ -250,7 +269,7 @@ def getattributesizes(urlbase: str, indexes: list):
 
         # Loop through pages of results until no more hits are returned.
         with tqdm(total=totalhits) as pbar:
-            while numhits > 0:# and ihit == 0: # itest for debug to limit # hits
+            while numhits > 0 and ihit < DEBUGHITNUM:
                 url = f"{urlbase}{idx}/_search"
                 response = requests.post(url=url, headers=headers, json=reqbody)
                 if response.status_code != 200:
@@ -264,6 +283,8 @@ def getattributesizes(urlbase: str, indexes: list):
                     hitsizes = []
                     for hit in hits:
                         ihit = ihit + 1
+                        if ihit == DEBUGHITNUM:
+                            break
                         hitsizes = gethitsizes(es_idx=idx, doc_hit=hit)
                         # Add the list of sizes for this hit to the Data Frame.
                         dfhit = pd.DataFrame.from_records(hitsizes, columns=colnames)
@@ -282,9 +303,9 @@ def getattributesizes(urlbase: str, indexes: list):
                         list_search_after.append(last_id)
                         reqbody["search_after"] = list_search_after
 
-    # Export dataframe to CSV.
-    print('Writing out attribute_sizes.csv')
-    dfattributesizes.to_csv('attribute_sizes.csv',index=False,mode='w')
+
+    return dfattributesizes
+
 
 # ----------------
 # MAIN
@@ -302,5 +323,17 @@ indexids = getindexids(myconfig=elastic_config)
 #print('Building attribute list...')
 #buildattributelist(urlbase=baseurl, indexes=indexids)
 
-print('Obtaining size statistics on documents....')
-getattributesizes(urlbase=baseurl,indexes=indexids)
+print('Obtaining sizes of documents....')
+dfSizes = getattributesizes(urlbase=baseurl,indexes=indexids)
+
+print('Calculating descriptive size statistics...')
+# Calculate statistics, grouping by attribute. Limit to those attributes that are either dicts or entire lists
+# (i.e., not list elements, which are formatted as "list[index]...").
+dfFilteredSizes = dfSizes.loc[dfSizes["type"].isin(["dict","list"]) & ~dfSizes["attribute"].str.contains("[",regex=False)]
+dfagg = dfFilteredSizes.groupby("attribute", as_index=False)["size"].agg(["min","max","count","mean","sum"])
+
+# Export dataframe to CSV.
+print('Writing out attribute_sizes.csv...')
+dfSizes.to_csv('attribute_sizes.csv',index=False,mode='w')
+print('Writing out attribute_sizes_statistics.csv...')
+dfagg.to_csv('attribute_size_statistics.csv',index=False,mode='w')
