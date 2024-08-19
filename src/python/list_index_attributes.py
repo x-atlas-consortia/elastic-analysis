@@ -158,7 +158,6 @@ def get_byte_size(obj) -> int:
     """
     Calculates the byte size of an element of a JSON  by converting it to a string.
     :param obj: an element in a JSON --e.g., a string, list, etc.
-    :return:
     """
 
     if type(obj) is dict:
@@ -186,33 +185,65 @@ def getkeysizes(es_idx: str, hmid: str, key_path: str, obj_key, obj) -> list:
     1       HMID of the hit that contains the element
     2       key path to the element. If the element is an element of a list, then the key path includes the
             list index.
-    3       size of the element, in bytes.
+    3       Python type of the element
+    4       size of the element, in bytes.
+    5       number of elements that the object contains
     """
     listsizes = []
+    ELEMENTCOUNTINDEX=5
 
-    fullpath = key_path + '.' + obj_key
-    # Size the object.
+    # Build information for the object itself, including the sum of counts from any elements.
+
+    # Build the key path for the element.
+    # Find the last key in the key path. If the last key is identical to the current key, avoid
+    # duplication. If the key path indicates that this object is an element of a list, do not
+    # repeat the list name in the key path.
+    keysplit = key_path.split('.')
+    last_key = ""
+    if len(keysplit) >1:
+        last_key = keysplit[(len(keysplit)-1)]
+
+    if obj_key==last_key:
+        fullpath = key_path
+    elif '[' in last_key:
+        fullpath = key_path
+    else:
+        fullpath = key_path + '.' + obj_key
+
+    # Get the type of the object. The statistical summary only includes information on
+    # objects that are containers--i.e., dictionaries and lists.
     typ = str(type(obj))
     typ = typ.strip(f"<class ").strip(f"'>")
-    listsizes.append((es_idx, hmid, fullpath, typ, get_byte_size(obj)))
 
-    # Size the contents of the object.
+    # Find size and count for each element that the object contains.
+    listelement = []
     if type(obj) is list:
         for o in obj:
             keypath_list = f'{fullpath}[{obj.index(o)}]'
-            listobjsizes = getkeysizes(es_idx=es_idx, hmid=hmid, key_path=keypath_list, obj_key=obj_key,obj=o)
-            listsizes = listsizes + listobjsizes
+            listelement = listelement + getkeysizes(es_idx=es_idx, hmid=hmid, key_path=keypath_list, obj_key=obj_key,obj=o)
     elif type(obj) is dict:
         for key in obj:
             keypath_nest = fullpath + '.' + key
-            listobjsizes = getkeysizes(es_idx=es_idx, hmid=hmid, key_path=keypath_nest, obj_key=key, obj=obj[key])
-            listsizes = listsizes + listobjsizes
+            listelement = listelement + getkeysizes(es_idx=es_idx, hmid=hmid, key_path=keypath_nest, obj_key=key, obj=obj[key])
+
+    # Complete information for the object, including the sum of counts from elements.
+    countelement = 0
+    if len(listelement) > 0:
+        for e in listelement:
+            countelement = countelement + e[ELEMENTCOUNTINDEX]
+    else:
+        countelement = 1 # the element itself
+
+    # Compile information for the object, then its contents.
+    listsizes.append((es_idx, hmid, fullpath, typ, get_byte_size(obj),countelement))
+    if len(listelement) > 0:
+        listsizes = listsizes + listelement
 
     return listsizes
 
 def gethitsizes(es_idx:str, doc_hit: dict) -> list:
     """
-    Returns the sizes of every non-private attribute in a document.
+    Returns the sizes and entity counts of every non-private attribute in a document.
     :param es_idx: An ElasticSearch index.
     :param doc_hit: A dict that corresponds to a "hit" in the response to a _search endpoint.
     :return: A list of sizes by attribute
@@ -221,13 +252,21 @@ def gethitsizes(es_idx:str, doc_hit: dict) -> list:
     source = doc_hit.get("_source")
     hmid = source.get("hubmap_id")
     listattributesizes = []
-    # Size of the hit itself.
-    listattributesizes.append((es_idx, hmid, "_source","dict",get_byte_size(source)))
+    allsizes = 0
+    allcounts = 0
 
     for key in source:
         # Size of each nested element in the hit.
         listkeysizes = getkeysizes(es_idx=es_idx, hmid=hmid, key_path="_source", obj_key=key, obj=source[key])
+        # Sum sizes and counts for all elements for the highest-level "_source" object.
+        for lks in listkeysizes:
+            allsizes = allsizes + lks[4]
+            allcounts = allcounts + lks[5]
         listattributesizes = listattributesizes + listkeysizes
+
+    # Information for the hit itself
+    listsourcesize = [(es_idx, hmid, "_source", "dict", allsizes, allcounts)]
+    listattributesizes = listsourcesize + listattributesizes
 
     return listattributesizes
 
@@ -241,13 +280,13 @@ def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
 
     """
 
-    DEBUGHITNUM = 5000  # test for debug to limit # hits
+    DEBUGHITNUM = 50000  # test for debug to limit # hits
 
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     reqbody = {"query": {"match_all": {}},"sort": [{"_id": "asc"}]}
 
     # Columns for output.
-    colnames = ["index","hmid","attribute","type","size"]
+    colnames = ["index","hmid","attribute","type","size","fieldcount"]
     dfattributesizes = pd.DataFrame(columns=colnames)
 
     for idx in indexes:
@@ -306,7 +345,21 @@ def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
 
     return dfattributesizes
 
+def getattributesizestats(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculates statistics on attribute sizes, grouping by attribute.
+    Limit to those attributes that are either dicts or entire lists
+    # (i.e., not list elements, which are formatted as "list[index]...").
 
+    :param df: the DataFrame built by the getattributesizes function.
+    :return: a DataFrame of statistics.
+    """
+    dfFiltered = df.loc[
+        df["type"].isin(["dict", "list"]) & ~df["attribute"].str.contains("[", regex=False)]
+    dfStats = dfFiltered.groupby(["index","attribute"], as_index=False).agg({"size": ["min", "max", "count", "mean", "sum"],
+                                                                   "fieldcount":["max"]})
+
+    return dfStats
 # ----------------
 # MAIN
 
@@ -327,13 +380,10 @@ print('Obtaining sizes of documents....')
 dfSizes = getattributesizes(urlbase=baseurl,indexes=indexids)
 
 print('Calculating descriptive size statistics...')
-# Calculate statistics, grouping by attribute. Limit to those attributes that are either dicts or entire lists
-# (i.e., not list elements, which are formatted as "list[index]...").
-dfFilteredSizes = dfSizes.loc[dfSizes["type"].isin(["dict","list"]) & ~dfSizes["attribute"].str.contains("[",regex=False)]
-dfagg = dfFilteredSizes.groupby("attribute", as_index=False)["size"].agg(["min","max","count","mean","sum"])
+dfstats = getattributesizestats(df=dfSizes)
 
 # Export dataframe to CSV.
 print('Writing out attribute_sizes.csv...')
 dfSizes.to_csv('attribute_sizes.csv',index=False,mode='w')
 print('Writing out attribute_sizes_statistics.csv...')
-dfagg.to_csv('attribute_size_statistics.csv',index=False,mode='w')
+dfstats.to_csv('attribute_size_statistics.csv',index=False,mode='w')
