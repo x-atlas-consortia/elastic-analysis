@@ -187,10 +187,10 @@ def getkeysizes(es_idx: str, hmid: str, key_path: str, obj_key, obj) -> list:
             list index.
     3       Python type of the element
     4       size of the element, in bytes.
-    5       number of elements that the object contains
+    5       a list of field names for fields contained by the object
+    6       a count of unique field names for fields contained by the object
     """
     listsizes = []
-    ELEMENTCOUNTINDEX=5
 
     # Build information for the object itself, including the sum of counts from any elements.
 
@@ -215,27 +215,50 @@ def getkeysizes(es_idx: str, hmid: str, key_path: str, obj_key, obj) -> list:
     typ = str(type(obj))
     typ = typ.strip(f"<class ").strip(f"'>")
 
-    # Find size and count for each element that the object contains.
+    # For each element that the object contains, find
+    # 1. the size of the element
+    # 2. the names of all fields contained by the element
     listelement = []
+    listfieldnames = []
+    listuniquefieldnames = []
+    listelementsizes = []
+
     if type(obj) is list:
         for o in obj:
+            # Indicate that this is an element of a list by appending the list object's index.
             keypath_list = f'{fullpath}[{obj.index(o)}]'
-            listelement = listelement + getkeysizes(es_idx=es_idx, hmid=hmid, key_path=keypath_list, obj_key=obj_key,obj=o)
+            # Recursively get sizes of all elements that this element contains.
+            listelementsizes = getkeysizes(es_idx=es_idx, hmid=hmid, key_path=keypath_list, obj_key=obj_key,obj=o)
+            listelement = listelement + listelementsizes
+            # Get field names for all elements that this element contains.
+            # The fifth item in each element size tuple is a list of field names for all nested
+            # fields contained by the element.
+            for l in listelementsizes:
+                listfieldnames = listfieldnames + l[5]
+            # Get unique list of field names, maintaining order.
+            listuniquefieldnames = list(dict.fromkeys(listfieldnames))
+
     elif type(obj) is dict:
         for key in obj:
+            # Recursively get sizes of all elements that this element contains.
             keypath_nest = fullpath + '.' + key
-            listelement = listelement + getkeysizes(es_idx=es_idx, hmid=hmid, key_path=keypath_nest, obj_key=key, obj=obj[key])
+            listelementsizes = getkeysizes(es_idx=es_idx, hmid=hmid, key_path=keypath_nest, obj_key=key, obj=obj[key])
+            listelement = listelement + listelementsizes
 
-    # Complete information for the object, including the sum of counts from elements.
-    countelement = 0
-    if len(listelement) > 0:
-        for e in listelement:
-            countelement = countelement + e[ELEMENTCOUNTINDEX]
-    else:
-        countelement = 1 # the element itself
+            listfieldnames.append(key)
+
+            # Get field names for all elements that this element contains.
+            # The fifth item in each element size tuple is a list of field names for all nested
+            # fields contained by the element.
+            for l in listelementsizes:
+                listfieldnames = listfieldnames + l[5]
+            # Get unique list of field names, maintaining order.
+            listuniquefieldnames = list(dict.fromkeys(listfieldnames))
+
+        #print(key_path,obj_key,typ, listuniquefieldnames)
 
     # Compile information for the object, then its contents.
-    listsizes.append((es_idx, hmid, fullpath, typ, get_byte_size(obj),countelement))
+    listsizes.append((es_idx, hmid, fullpath, typ, get_byte_size(obj),listuniquefieldnames,len(listuniquefieldnames)))
     if len(listelement) > 0:
         listsizes = listsizes + listelement
 
@@ -253,19 +276,24 @@ def gethitsizes(es_idx:str, doc_hit: dict) -> list:
     hmid = source.get("hubmap_id")
     listattributesizes = []
     allsizes = 0
-    allcounts = 0
+    listfieldnames = []
+    listuniquefieldnames = []
 
     for key in source:
-        # Size of each nested element in the hit.
+        # Size of each nested element in the hit source dict.
         listkeysizes = getkeysizes(es_idx=es_idx, hmid=hmid, key_path="_source", obj_key=key, obj=source[key])
-        # Sum sizes and counts for all elements for the highest-level "_source" object.
+        # Sum sizes and field lists for all elements for the highest-level "_source" object.
         for lks in listkeysizes:
             allsizes = allsizes + lks[4]
-            allcounts = allcounts + lks[5]
+            listfieldnames = listfieldnames + lks[5]
+
         listattributesizes = listattributesizes + listkeysizes
 
-    # Information for the hit itself
-    listsourcesize = [(es_idx, hmid, "_source", "dict", allsizes, allcounts)]
+    # List of unique field names and count for the hit's _source object.
+    listuniquefieldnames = list(dict.fromkeys(listfieldnames))
+    fieldcount = len(listuniquefieldnames)
+
+    listsourcesize = [(es_idx, hmid, "_source", "dict", allsizes, listuniquefieldnames, fieldcount)]
     listattributesizes = listsourcesize + listattributesizes
 
     return listattributesizes
@@ -280,13 +308,13 @@ def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
 
     """
 
-    DEBUGHITNUM = 50000  # test for debug to limit # hits
+    DEBUGHITNUM = 3  # test for debug to limit # hits
 
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     reqbody = {"query": {"match_all": {}},"sort": [{"_id": "asc"}]}
 
     # Columns for output.
-    colnames = ["index","hmid","attribute","type","size","fieldcount"]
+    colnames = ["index","hmid","attribute","type","size","fieldnames","fieldcount"]
     dfattributesizes = pd.DataFrame(columns=colnames)
 
     for idx in indexes:
