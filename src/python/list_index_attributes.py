@@ -14,6 +14,7 @@ import pandas as pd
 import os
 import sys
 import json
+import re
 
 # Utilties
 import utils.config as cfg
@@ -102,7 +103,8 @@ def getattributes(idx: str, urlbase: str):
 
             # Concatenate the padded path list to the other variables and convert to a tuple.
             ret = [index, attributename, indextype, isprivate, searchable] + listpath
-            listret.append(tuple(ret))
+            if 'keyword' not in attributename:
+                listret.append(tuple(ret))
 
     return listret
 
@@ -148,7 +150,7 @@ def buildattributelist(urlbase: str, indexes: list):
 
     # Sort the DataFrame.
     dfindexattributes = dfindexattributes.sort_values(
-        by=['index', 'ancestor_level_3', 'ancestor_level_2', 'ancestor_level_1', 'attribute_key'])
+        by=['index', 'attribute'])
 
     # Export dataframe to CSV.
     dfindexattributes.to_csv('index_attributes.csv', index=False)
@@ -187,79 +189,100 @@ def getkeysizes(es_idx: str, hmid: str, key_path: str, obj_key, obj) -> list:
             list index.
     3       Python type of the element
     4       size of the element, in bytes.
-    5       a list of field names for fields contained by the object
-    6       a count of unique field names for fields contained by the object
+    5       count of unique attribute that this element contains, including the element's own attribute.
+
+    Example: "dictA": {
+                        "listB": [
+                            "dictB1": {
+                                "fieldB11": "b11",
+                                "fieldB12": "b12"
+                            },
+                            "dictB2": {
+                                "fieldB11": "b21",
+                                "fieldB12": "b22",
+                                "fieldB13": "b23"
+                            },
+                        ],
+                        "fieldC": "c1"
+                      }
+
+    returns:
+    fieldB11:   ("index", "hmid", "str", size of fieldB11, 1) <-- the field itself
+    fieldB12:   ("index", "hmid", "str", size of fieldB12, 0) <-- the field itself
+    dictB1:     ("index", "hmid", "dict", size of dictB1, 3) <-- the dict plus the dict keys
+    dictB2:     ("index", "hmid", "dict", size of dictB2, 4) <-- the dict plus the dict keys
+    listB:      ("index", "hmid", "dict", size of listB, 4) <-- the list + the union of unique keys from all elements
+    fieldC:     ("index", "hmid", "str", size of fieldC, 1) <-- the field
+    dictA:      ("index", "hmid", "str", size of dictA, 6) <-- the dict + fieldC + listB + 3 fields in listB
+
     """
+
     listsizes = []
+    listattributes = []
 
     # Build information for the object itself, including the sum of counts from any elements.
 
-    # Build the key path for the element.
-    # Find the last key in the key path. If the last key is identical to the current key, avoid
-    # duplication. If the key path indicates that this object is an element of a list, do not
+    # Build the key path for the element. This is for display in the resulting spreadsheet.
+    # Find the last key in the key path. If the last key is identical to the current key, then
+    # this is an element in a list.
+    # If the key path indicates that this object is an element of a list, do not
     # repeat the list name in the key path.
+
     keysplit = key_path.split('.')
     last_key = ""
     if len(keysplit) >1:
         last_key = keysplit[(len(keysplit)-1)]
-
-    if obj_key==last_key:
+    if obj_key==last_key: # object without fields
         fullpath = key_path
-    elif '[' in last_key:
+    elif '[' in last_key: # list element
         fullpath = key_path
     else:
         fullpath = key_path + '.' + obj_key
 
-    # Get the type of the object. The statistical summary only includes information on
+    # Get the type of the object. The statistical summary will only include information on
     # objects that are containers--i.e., dictionaries and lists.
     typ = str(type(obj))
     typ = typ.strip(f"<class ").strip(f"'>")
 
+    # Build the equivalent of an ElasticSearch attribute--i.e., a period-delimited field path.
+    # This is just the full path to the object, stripped of list index notation pattern of [x]
+    obj_attribute = re.sub("\[.*?\]","",fullpath)
+
+    # Add the attribute for the object to the attribute list
+    listattributes = [obj_attribute]
+
     # For each element that the object contains, find
     # 1. the size of the element
-    # 2. the names of all fields contained by the element
-    listelement = []
-    listfieldnames = []
-    listuniquefieldnames = []
+    # 2. the attributes of elements that the element contains
+
+    # sizes information on nested elements
     listelementsizes = []
+    listelement = []
 
-    if type(obj) is list:
-        for o in obj:
-            # Indicate that this is an element of a list by appending the list object's index.
-            keypath_list = f'{fullpath}[{obj.index(o)}]'
-            # Recursively get sizes of all elements that this element contains.
-            listelementsizes = getkeysizes(es_idx=es_idx, hmid=hmid, key_path=keypath_list, obj_key=obj_key,obj=o)
-            listelement = listelement + listelementsizes
-            # Get field names for all elements that this element contains.
-            # The fifth item in each element size tuple is a list of field names for all nested
-            # fields contained by the element.
-            for l in listelementsizes:
-                listfieldnames = listfieldnames + l[5]
-            # Get unique list of field names, maintaining order.
-            listuniquefieldnames = list(dict.fromkeys(listfieldnames))
-
-    elif type(obj) is dict:
-        for key in obj:
-            # Recursively get sizes of all elements that this element contains.
-            keypath_nest = fullpath + '.' + key
-            listelementsizes = getkeysizes(es_idx=es_idx, hmid=hmid, key_path=keypath_nest, obj_key=key, obj=obj[key])
+    # If the object is either a list or dictionary, obtain information for the elements
+    # that the object contains.
+    if type(obj) is list or type(obj) is dict:
+        for element in obj: # list element or dict key
+            if type(obj) is list:
+                key_path_element = f'{fullpath}[{obj.index(element)}]'
+                obj_key_element = obj_key
+                obj_element = element
+            else:
+                key_path_element = fullpath + '.' + element
+                obj_key_element = element
+                obj_element = obj[element]
+            # Get size information on all nested elements and add it to the information for the object.
+            listelementsizes = getkeysizes(es_idx=es_idx, hmid=hmid, key_path=key_path_element, obj_key=obj_key_element, obj=obj_element)
             listelement = listelement + listelementsizes
 
-            listfieldnames.append(key)
+            # Add to the list of attributes for the object those that the object contains.
+            for les in listelementsizes:
+                listattributes = listattributes + les[5]
 
-            # Get field names for all elements that this element contains.
-            # The fifth item in each element size tuple is a list of field names for all nested
-            # fields contained by the element.
-            for l in listelementsizes:
-                listfieldnames = listfieldnames + l[5]
-            # Get unique list of field names, maintaining order.
-            listuniquefieldnames = list(dict.fromkeys(listfieldnames))
-
-        #print(key_path,obj_key,typ, listuniquefieldnames)
-
-    # Compile information for the object, then its contents.
-    listsizes.append((es_idx, hmid, fullpath, typ, get_byte_size(obj),listuniquefieldnames,len(listuniquefieldnames)))
-    if len(listelement) > 0:
+    # Compile information into a tuple for the object, then add the tuples for the contents.
+    listuniqueattributes = list(dict.fromkeys(listattributes))
+    listsizes.append((es_idx, hmid, fullpath, typ, get_byte_size(obj),listuniqueattributes,len(listuniqueattributes)))
+    if len(listelementsizes) > 0:
         listsizes = listsizes + listelement
 
     return listsizes
@@ -275,25 +298,22 @@ def gethitsizes(es_idx:str, doc_hit: dict) -> list:
     source = doc_hit.get("_source")
     hmid = source.get("hubmap_id")
     listattributesizes = []
+    listattributes = ["_source"]
+    listuniqueattributes = []
     allsizes = 0
-    listfieldnames = []
-    listuniquefieldnames = []
 
     for key in source:
         # Size of each nested element in the hit source dict.
         listkeysizes = getkeysizes(es_idx=es_idx, hmid=hmid, key_path="_source", obj_key=key, obj=source[key])
-        # Sum sizes and field lists for all elements for the highest-level "_source" object.
+        # Sum sizes for all elements for the highest-level "_source" object.
         for lks in listkeysizes:
             allsizes = allsizes + lks[4]
-            listfieldnames = listfieldnames + lks[5]
+            listattributes = listattributes + lks[5]
 
         listattributesizes = listattributesizes + listkeysizes
+        listuniqueattributes = list(dict.fromkeys(listattributes))
+    listsourcesize = [(es_idx, hmid, "_source", "dict", allsizes,listuniqueattributes, len(listuniqueattributes))]
 
-    # List of unique field names and count for the hit's _source object.
-    listuniquefieldnames = list(dict.fromkeys(listfieldnames))
-    fieldcount = len(listuniquefieldnames)
-
-    listsourcesize = [(es_idx, hmid, "_source", "dict", allsizes, listuniquefieldnames, fieldcount)]
     listattributesizes = listsourcesize + listattributesizes
 
     return listattributesizes
@@ -306,15 +326,16 @@ def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
 
     This method use "search_after" methodology to page through all the documents in ElasticSearch.
 
+    Refer to the getkeysizes method for a description of the columns of the hitsizes list.
     """
 
-    DEBUGHITNUM = 3  # test for debug to limit # hits
+    DEBUGHITNUM = 5  # test for debug to limit # hits
 
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     reqbody = {"query": {"match_all": {}},"sort": [{"_id": "asc"}]}
 
     # Columns for output.
-    colnames = ["index","hmid","attribute","type","size","fieldnames","fieldcount"]
+    colnames = ["index", "hmid", "path", "type", "size", "attributes", "attributecount"]
     dfattributesizes = pd.DataFrame(columns=colnames)
 
     for idx in indexes:
@@ -352,6 +373,7 @@ def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
                         ihit = ihit + 1
                         if ihit == DEBUGHITNUM:
                             break
+                        # Obtain a list of tuples of element size information.
                         hitsizes = gethitsizes(es_idx=idx, doc_hit=hit)
                         # Add the list of sizes for this hit to the Data Frame.
                         dfhit = pd.DataFrame.from_records(hitsizes, columns=colnames)
@@ -383,11 +405,65 @@ def getattributesizestats(df: pd.DataFrame) -> pd.DataFrame:
     :return: a DataFrame of statistics.
     """
     dfFiltered = df.loc[
-        df["type"].isin(["dict", "list"]) & ~df["attribute"].str.contains("[", regex=False)]
-    dfStats = dfFiltered.groupby(["index","attribute"], as_index=False).agg({"size": ["min", "max", "count", "mean", "sum"],
-                                                                   "fieldcount":["max"]})
-
+        df["type"].isin(["dict", "list"]) & ~df["path"].str.contains("[", regex=False)]
+    dfStats = dfFiltered.groupby(["index","path"], as_index=False).agg({"size": ["min", "max","mean"],
+                                                                       "attributecount": ["max"]})
     return dfStats
+
+def exportallattributes(df: pd.DataFrame):
+
+    """
+    Exports the complete set of unique attributes present in all documents for all indexes.
+    :param df: the DataFrame built by the getattributesizes function.
+    :return:
+    """
+
+    # Filter the dataframe to just the attribute lists for each document.
+    dfattributes = df.loc[df["path"] == "_source"]
+
+    # Get a list of indexes.
+    listindexes = dfattributes["index"].drop_duplicates().tolist()
+
+    # Export to file by index.
+    for i in listindexes:
+        print (f"Exporting for index {i}....")
+        # Filter to the attributes for the index.
+        dfindexattributes = dfattributes.loc[dfattributes["index"] == i]
+
+        # Compile union of attributes.
+        listattributes = []
+        for index, row in dfindexattributes.iterrows():
+            listattributes = listattributes + row["attributes"]
+        listuniqueattributes = list(dict.fromkeys(listattributes))
+
+        # Export
+        sattribute = pd.Series(listuniqueattributes)
+        file = f"{i}.csv"
+        sattribute.to_csv(file, index=False, mode="w")
+
+def exporthitattributes(df: pd.DataFrame, filecount: int=0):
+
+    """
+    Exports to file the attributes of every document.
+    :param df: the DataFrame built by the getattributesizes function.
+    :param filecount: optional number of ids to export
+    :return:
+    """
+
+    # Filter the dataframe to just the attribute lists for each document.
+    dfattributes = df.loc[df["path"] == "_source"]
+    if filecount == 0:
+        filecount = len(dfattributes.index)
+
+    i = 0
+
+    for index, row in dfattributes.iterrows():
+        if i < filecount:
+            sattribute = pd.Series(row["attributes"])
+            file = f'{row["hmid"]}.csv'
+            sattribute.to_csv(file, index=False, mode="w")
+        i = i + 1
+
 # ----------------
 # MAIN
 
@@ -401,8 +477,8 @@ baseurl = elastic_config.get_value(section='Elastic', key='baseurl')
 # Obtain list of index URLs.
 indexids = getindexids(myconfig=elastic_config)
 
-#print('Building attribute list...')
-#buildattributelist(urlbase=baseurl, indexes=indexids)
+print('Building attribute list...')
+buildattributelist(urlbase=baseurl, indexes=indexids)
 
 print('Obtaining sizes of documents....')
 dfSizes = getattributesizes(urlbase=baseurl,indexes=indexids)
@@ -415,3 +491,9 @@ print('Writing out attribute_sizes.csv...')
 dfSizes.to_csv('attribute_sizes.csv',index=False,mode='w')
 print('Writing out attribute_sizes_statistics.csv...')
 dfstats.to_csv('attribute_size_statistics.csv',index=False,mode='w')
+
+print('Exporting complete attribute list....')
+exportallattributes(df=dfSizes)
+
+#print('Exporting attributes by hmid for first 10 hmmids....')
+#exporthitattributes(df=dfSizes, filecount=10)
