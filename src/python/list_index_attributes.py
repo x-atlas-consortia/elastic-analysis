@@ -329,7 +329,7 @@ def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
     Refer to the getkeysizes method for a description of the columns of the hitsizes list.
     """
 
-    DEBUGHITNUM = 5  # test for debug to limit # hits
+    DEBUGHITNUM = 5000  # test for debug to limit # hits
 
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     reqbody = {"query": {"match_all": {}},"sort": [{"_id": "asc"}]}
