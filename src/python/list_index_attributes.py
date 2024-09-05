@@ -318,6 +318,37 @@ def gethitsizes(es_idx:str, doc_hit: dict) -> list:
 
     return listattributesizes
 
+def gettotaldocumentcount(urlbase: str, index: str, headers: str, reqbody: str) -> int:
+    """
+    Obtains the total count of documents associated with an index.
+    :param urlbase: base URL for ElasticSearch, obtained from a config file.
+    :param index: ElasticSearch index
+    :return: count
+    """
+
+    # Get the total number of hits for the progress bar.
+    url = f"{urlbase}{index}/_search"
+
+    print('Getting total count...')
+    total = 0
+    totalhits = 0
+
+    while total >= 0:
+        response = requests.post(url=url, headers=headers, json=reqbody)
+        if response.status_code == 200:
+            rjson = response.json()
+            total = len(rjson.get("hits").get("hits"))
+            totalhits = totalhits + total
+            print(totalhits)
+
+        else:
+            print(f'Error: {response.status_code}')
+            exit(1)
+
+    print(f'Total count for {index}: {totalhits}')
+
+    return totalhits
+
 def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
     """
     Obtains the byte sizes of every attribute in all documents in ElasticSearch.
@@ -345,15 +376,9 @@ def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
         # Initialize count of hits from search response to default.
         numhits = 10
 
-        # Get the total number of hits for the progress bar.
-        url = f"{urlbase}{idx}/_search"
-        response = requests.post(url=url, headers=headers, json=reqbody)
-        if response.status_code == 200:
-            rjson = response.json()
-            totalhits = rjson.get("hits").get("total").get("value")
-        else:
-            print(f'Error: {response.status_code}')
-            exit(1)
+        #totalhits = gettotaldocumentcount(urlbase=urlbase, index=idx, headers=headers, reqbody=reqbody)
+        # Use rough estimate of totalhits.
+        totalhits = 55000
 
         # Loop through pages of results until no more hits are returned.
         with tqdm(total=totalhits) as pbar:
@@ -477,8 +502,8 @@ baseurl = elastic_config.get_value(section='Elastic', key='baseurl')
 # Obtain list of index URLs.
 indexids = getindexids(myconfig=elastic_config)
 
-print('Building attribute list...')
-buildattributelist(urlbase=baseurl, indexes=indexids)
+#print('Building attribute list...')
+#buildattributelist(urlbase=baseurl, indexes=indexids)
 
 print('Obtaining sizes of documents....')
 dfSizes = getattributesizes(urlbase=baseurl,indexes=indexids)
