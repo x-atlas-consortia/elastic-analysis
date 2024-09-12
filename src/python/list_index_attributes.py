@@ -360,7 +360,7 @@ def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
     Refer to the getkeysizes method for a description of the columns of the hitsizes list.
     """
 
-    DEBUGHITNUM = 5000  # test for debug to limit # hits
+    DEBUGHITNUM = 10000000  # test for debug to limit # hits
 
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     reqbody = {"query": {"match_all": {}},"sort": [{"_id": "asc"}]}
@@ -384,9 +384,11 @@ def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
         with tqdm(total=totalhits) as pbar:
             while numhits > 0 and ihit < DEBUGHITNUM:
                 url = f"{urlbase}{idx}/_search"
+                print(url)
                 response = requests.post(url=url, headers=headers, json=reqbody)
                 if response.status_code != 200:
-                    print(f'Error searching :{response.status_code}')
+                    print(f'Error executing search endpoint:{response}')
+                    exit(1)
                 else:
                     rjson = response.json()
                     hits = rjson.get("hits").get("hits")
