@@ -28,26 +28,6 @@ def getconfig() -> cfg.myConfigParser:
     cfgfile = os.path.join(os.path.dirname(os.getcwd()), 'python/elastic_urls.ini')
     return cfg.myConfigParser(cfgfile)
 
-
-def getindexids(myconfig: cfg.myConfigParser) -> list:
-    """
-    Obtains names of ElasticSearch indexes.
-
-    :param myconfig: instance of a myConfigParser class representing the configuration ini file.
-
-    :return: list of index names
-    """
-
-    # Obtain list of indexes.
-    listret = []
-    dictindex = myconfig.get_section(section='indexes')
-    for key in dictindex:
-        # listret.append(urlbase + dictindex[key]+'/_field_caps?fields=*')
-        listret.append(dictindex[key])
-
-    return listret
-
-
 def getattributes(idx: str, urlbase: str):
     """
     Returns a list of tuples for attributes.
@@ -340,35 +320,30 @@ def getsearchproperty(url: str, index: str, headers: str, reqbody: str, property
     return prop
 
 
-def getattributesizes(urlbase: str, indexes: list, pagination: str) -> pd.DataFrame:
+def getattributesizes(urlbase: str, indexes: list, pagination: str,
+                      maxcounthits: int, entities_to_skip: list, scroll_context: str) -> pd.DataFrame:
     """
     Obtains the byte sizes of every attribute in all documents in ElasticSearch.
     :param urlbase: base URL for ElasticSearch, obtained from a config file.
     :param indexes: list of indexes, obtained from a config file.
     :param pagination: method of pagination--either "scroll" or "search_after".
+    :param maxcounthits: number of hits (documents) to process. Useful for debugging.
+    :param entities_to_skip: list of entity types to exclude from processing.
+    :param scroll_context: scroll context length in ElasticSearch scroll format (e.g., 1m, 2h)
 
     Refer to the getkeysizes method for a description of the columns of the hitsizes list.
     """
-
-    DEBUGHITNUM = 1000000  # used in debugging to limit number of hits processed
 
     # Columns for output.
     colnames = ['index', 'hmid', 'path', 'type', 'size', 'attributes', 'attributecount']
     # DataFrames for output.
     dfattributesizes = pd.DataFrame(columns=colnames)
-    dfskip = pd.DataFrame(columns=['id'])
+    dfskip = pd.DataFrame(columns=['entity_type','id'])
 
     # search query information
     headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
     # request body for initial/invariant search queries, including count.
-    initreqbody = {
-    "query": {
-        "match_all": {}
-    }
-}
-
-    # scroll context (lifetime)
-    scroll_context = '2h'
+    initreqbody = {"query": {"match_all": {}}}
 
     for idx in indexes:
 
@@ -391,10 +366,10 @@ def getattributesizes(urlbase: str, indexes: list, pagination: str) -> pd.DataFr
         initreqbody["sort"] = [{"created_timestamp": "asc"}]
 
         # Loop through pages of results until no more hits are returned.
-        # (or until the maximum number of hits per DEBUGHITNUM is processed)
+        # (or until the maximum number of hits as specified by debughitnum is processed)
         with tqdm(total=totalhits) as pbar:
 
-            while numhits > 0 and ihit < DEBUGHITNUM:
+            while numhits > 0 and ihit < maxcounthits:
 
                 # EXECUTE SEARCH ENDPOINT.
                 # Scrolling searches use two types of calls:
@@ -444,15 +419,14 @@ def getattributesizes(urlbase: str, indexes: list, pagination: str) -> pd.DataFr
                 hitsizes = []
                 for hit in hits:
                     ihit = ihit + 1
-                    if ihit == DEBUGHITNUM:
+                    if ihit == maxcounthits:
                         break
                     entity_type = hit.get('_source').get('entity_type')
-                    #print(hit.get('_source').get('hubmap_id'))
-                    if entity_type == 'Upload':
-                        # In general, upload entities contain large numbers of datasets, and
-                        # are too large to process.
+                    if entity_type in entities_to_skip:
+                        # Some entity types may be too large to process. For example,
+                        # 'Upload' entities may contain large numbers of datasets.
                         id = hit.get('_source').get('hubmap_id')
-                        dfhit = pd.DataFrame.from_records([{'id':id}])
+                        dfhit = pd.DataFrame.from_records([{'entity_type':entity_type, 'id':id}])
                         dfskip = pd.concat([dfskip,dfhit])
                     else:
                         # Obtain a list of tuples of element size information.
@@ -557,17 +531,25 @@ def exporthitattributes(df: pd.DataFrame, filecount: int=0):
 # Open INI file.
 elastic_config = getconfig()
 
-# Obtain base URL for ElasticSearch endpoints.
+# Obtain parameters for calling ElasticSearch endpoints.
 baseurl = elastic_config.get_value(section='Elastic', key='baseurl')
+maxcounthits = int(elastic_config.get_value(section='Elastic', key='docstocheck'))
+pagination = elastic_config.get_value(section='Elastic', key='pagination')
+entities_to_skip = elastic_config.get_section_values(section='entities_to_skip')
+print(entities_to_skip)
+
+scroll_context = elastic_config.get_value(section='Elastic', key='scroll_context')
 
 # Obtain list of index URLs.
-indexids = getindexids(myconfig=elastic_config)
+indexids = elastic_config.get_section_values(section='indexes')
 
 #print('Building attribute list...')
 #buildattributelist(urlbase=baseurl, indexes=indexids)
 
 print('Obtaining sizes of documents....')
-dfSizes = getattributesizes(urlbase=baseurl,indexes=indexids, pagination='scroll')
+dfSizes = getattributesizes(urlbase=baseurl,indexes=indexids, pagination=pagination,
+                            maxcounthits=maxcounthits, entities_to_skip=entities_to_skip,
+                            scroll_context=scroll_context)
 
 print('Calculating descriptive size statistics...')
 dfstats = getattributesizestats(df=dfSizes)

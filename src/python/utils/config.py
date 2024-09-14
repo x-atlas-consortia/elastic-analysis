@@ -37,18 +37,18 @@ class myConfigParser:
             print(f'Error reading configuration file: Missing key [{key}] in section [{section}]')
             exit(1)
 
-    def get_section(self, section: str)-> dict:
+    def get_section_values(self, section: str)-> list:
 
-        # Returns a section of the config file as a dictionary.
+        # Returns a section of the config file as a list of values.
 
-        dictreturn = {}
+        listret = []
 
         try:
             sect = self.config[section]
             for key in sect:
-                dictreturn[key]=self.config[section][key]
+                listret.append(self.config[section][key])
         except configparser.NoSectionError as e:
             print(f'Error reading configuration file: Missing section [{section}]')
             exit(1)
 
-        return dictreturn
+        return listret
