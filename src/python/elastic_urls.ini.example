@@ -1,9 +1,21 @@
 # Elastic Search configuration
-base_url=url
+[Elastic]
+baseurl=url
+# maximum number of documents to process
+docstocheck=100000
+# search pagination method: scroll or search_after
+pagination=scroll
+# scroll context (lifetime of scrolling key), in ElasticSearch format (e.g., 1m, 2h)
+scroll_context=24h
 
-[URL]
+# entity types to skip
+[entities_to_skip]
+Upload=Upload
+
+[indexes]
 # URLs for indexes
-consortium_entities=hm_stage_rc_consortium_entities
-consortium_portal=hm_stage_rc_consortium_portal
-public_entities=hm_stage_rc_public_entities
-public_portal=hm_stage_rc_public_portal
+#consortium_entities=hm_stage_rc_consortium_entities
+# 53275
+consortium_entities=hm_test_consortium_entities
+# 55878
+#consortium_entities=hm_test_consortium_entities
