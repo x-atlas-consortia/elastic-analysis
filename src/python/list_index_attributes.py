@@ -75,7 +75,7 @@ def getattributes(idx: str, urlbase: str):
 
     # Obtain index data using a field capacity query.
     headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
-    url = f"{urlbase}/{idx}/_field_caps?fields=*"
+    url = f'{urlbase}/{idx}/_field_caps?fields=*'
     response = requests.get(url, headers=headers)
 
     if response.status_code == 200:
@@ -229,7 +229,7 @@ def getkeysizes(es_idx: str, hmid: str, key_path: str, obj_key, obj) -> list:
     # repeat the list name in the key path.
 
     keysplit = key_path.split('.')
-    last_key = ""
+    last_key = ''
     if len(keysplit) >1:
         last_key = keysplit[(len(keysplit)-1)]
     if obj_key==last_key: # object without fields
@@ -295,16 +295,17 @@ def gethitsizes(es_idx:str, doc_hit: dict) -> list:
     :return: A list of sizes by attribute
     """
 
-    source = doc_hit.get("_source")
-    hmid = source.get("hubmap_id")
+    source = doc_hit.get('_source')
+    hmid = source.get('hubmap_id')
+    entity_type = source.get('entity_type')
     listattributesizes = []
-    listattributes = ["_source"]
+    listattributes = ['_source']
     listuniqueattributes = []
     allsizes = 0
 
     for key in source:
         # Size of each nested element in the hit source dict.
-        listkeysizes = getkeysizes(es_idx=es_idx, hmid=hmid, key_path="_source", obj_key=key, obj=source[key])
+        listkeysizes = getkeysizes(es_idx=es_idx, hmid=hmid, key_path='_source', obj_key=key, obj=source[key])
         # Sum sizes for all elements for the highest-level "_source" object.
         for lks in listkeysizes:
             allsizes = allsizes + lks[4]
@@ -312,42 +313,32 @@ def gethitsizes(es_idx:str, doc_hit: dict) -> list:
 
         listattributesizes = listattributesizes + listkeysizes
         listuniqueattributes = list(dict.fromkeys(listattributes))
-    listsourcesize = [(es_idx, hmid, "_source", "dict", allsizes,listuniqueattributes, len(listuniqueattributes))]
+    listsourcesize = [(es_idx, hmid, '_source', 'dict', allsizes,listuniqueattributes, len(listuniqueattributes))]
 
     listattributesizes = listsourcesize + listattributesizes
 
     return listattributesizes
 
-def gettotaldocumentcount(urlbase: str, index: str, headers: str, reqbody: str) -> int:
+def getsearchproperty(url: str, index: str, headers: str, reqbody: str, property:str) -> int:
     """
-    Obtains the total count of documents associated with an index.
-    :param urlbase: base URL for ElasticSearch, obtained from a config file.
+    Obtains a property of a search response.
+    :param url: base URL for ElasticSearch, obtained from a config file.
     :param index: ElasticSearch index
+    :param headers: HTML headers
+    :param reqbody: request body
     :return: count
     """
 
-    # Get the total number of hits for the progress bar.
-    url = f"{urlbase}{index}/_search"
+    response = requests.post(url=url, headers=headers, json=reqbody)
+    if response.status_code in [200,201]:
+        rjson = response.json()
+        prop = rjson[property]
+    else:
+        print(f'Error: {response.status_code}')
+        exit(1)
 
-    print('Getting total count...')
-    total = 0
-    totalhits = 0
+    return prop
 
-    while total >= 0:
-        response = requests.post(url=url, headers=headers, json=reqbody)
-        if response.status_code == 200:
-            rjson = response.json()
-            total = len(rjson.get("hits").get("hits"))
-            totalhits = totalhits + total
-            print(totalhits)
-
-        else:
-            print(f'Error: {response.status_code}')
-            exit(1)
-
-    print(f'Total count for {index}: {totalhits}')
-
-    return totalhits
 
 def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
     """
@@ -360,66 +351,111 @@ def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
     Refer to the getkeysizes method for a description of the columns of the hitsizes list.
     """
 
-    DEBUGHITNUM = 10000000  # test for debug to limit # hits
-
-    headers = {"Accept": "application/json", "Content-Type": "application/json"}
-    reqbody = {"query": {"match_all": {}},"sort": [{"_id": "asc"}]}
+    DEBUGHITNUM = 100000  # used in debugging to limit number of hits processed
 
     # Columns for output.
-    colnames = ["index", "hmid", "path", "type", "size", "attributes", "attributecount"]
+    colnames = ['index', 'hmid', 'path', 'type', 'size', 'attributes', 'attributecount']
+    # DataFrames for output.
     dfattributesizes = pd.DataFrame(columns=colnames)
+    dfskip = pd.DataFrame(columns=['id'])
+
+    # search query information
+    headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
+    # request body for initial search queries, including count.
+    initreqbody = {'query': {'match_all': {}}}
 
     for idx in indexes:
 
+        # counter of hits (documents) processed.
         ihit = 0
+        # counter of endpoint calls.
+        icall = 0
+
         print(f'Sizing documents in index: {idx}')
         # Initialize count of hits from search response to default.
         numhits = 10
 
-        #totalhits = gettotaldocumentcount(urlbase=urlbase, index=idx, headers=headers, reqbody=reqbody)
-        # Use rough estimate of totalhits.
-        totalhits = 55000
+        # Get count of records.
+        urlcount = f'{urlbase}{idx}/_count'
+        totalhits = getsearchproperty(url=urlcount, index=idx, headers=headers, reqbody=initreqbody,
+                                      property='count')
+        print(f'{idx} document count: {totalhits}')
 
         # Loop through pages of results until no more hits are returned.
+        # (or until the maximum number of hits per DEBUGHITNUM is processed)
         with tqdm(total=totalhits) as pbar:
+
             while numhits > 0 and ihit < DEBUGHITNUM:
-                url = f"{urlbase}{idx}/_search"
-                print(url)
-                response = requests.post(url=url, headers=headers, json=reqbody)
+
+                # EXECUTE SCROLLING SEARCH ENDPOINT.
+                # Scrolling searches use two types of calls:
+                # 1. The initial call establishes the response and obtains a scrolling key.
+                # 2. Subsequent calls use the scrolling key.
+                if icall == 0:
+                    # initial scrolling search url
+                    url = f'{urlbase}{idx}/_search?scroll=1m'
+                    req = initreqbody
+                else:
+                    # subsequent scrolling search url
+                    url = f'{urlbase}_search/scroll'
+                    # The crolling request body will be defined in the inital call.
+                    req = scrollreqbody
+
+                response = requests.post(url=url, headers=headers, json=req)
+
                 if response.status_code != 200:
                     print(f'Error executing search endpoint:{response}')
                     exit(1)
-                else:
-                    rjson = response.json()
-                    hits = rjson.get("hits").get("hits")
-                    numhits = len(hits)
 
-                    # Obtain size of every attribute in the hit.
-                    hitsizes = []
-                    for hit in hits:
-                        ihit = ihit + 1
-                        if ihit == DEBUGHITNUM:
-                            break
+                if icall == 0:
+                    # This is the initial call. Get scroll key to be used in subsequent calls.
+                    scroll_id = response.json().get('_scroll_id')
+                    # Build the request body to be used on all search endpoints after the initial one.
+                    scrollreqbody = {'scroll': '1m', 'scroll_id': scroll_id}
+
+                icall = icall + 1
+
+                # PROCESS RESPONSE.
+                rjson = response.json()
+                hits = rjson.get('hits').get('hits')
+                numhits = len(hits)
+
+                # Obtain size of every attribute in the hit.
+                hitsizes = []
+                for hit in hits:
+                    ihit = ihit + 1
+                    if ihit == DEBUGHITNUM:
+                        break
+                    entity_type = hit.get('_source').get('entity_type')
+                    if entity_type == 'Upload':
+                        # In general, upload entities contain large numbers of datasets, and
+                        # are too large to process.
+                        id = hit.get('_source').get('hubmap_id')
+                        dfhit = pd.DataFrame.from_records([{'id':id}])
+                        dfskip = pd.concat([dfskip,dfhit])
+                    else:
                         # Obtain a list of tuples of element size information.
                         hitsizes = gethitsizes(es_idx=idx, doc_hit=hit)
                         # Add the list of sizes for this hit to the Data Frame.
                         dfhit = pd.DataFrame.from_records(hitsizes, columns=colnames)
                         dfattributesizes = pd.concat([dfattributesizes, dfhit])
-                         # Advance the progress bar.
-                        pbar.update(1)
 
-                    if numhits == 0:
-                        # Re-initialize the request body.
-                        del reqbody["search_after"]
-                    else:
-                        # Build pagination for searches after the first--i.e., a search_after key.
-                        last_hit = hits[numhits-1]
-                        last_id = last_hit.get("sort")[0]
-                        list_search_after = []
-                        list_search_after.append(last_id)
-                        reqbody["search_after"] = list_search_after
+                    # Advance the progress bar.
+                    pbar.update(1)
 
+                # If using search_after methodology instead of scrolling.
+                # if numhits == 0:
+                    # Re-initialize the request body.
+                    # del reqbody['search_after']
+                # else:
+                    # Build pagination for searches after the first--i.e., a search_after key.
+                    # last_hit = hits[numhits-1]
+                    # last_id = last_hit.get('sort')[0]
+                    # list_search_after = []
+                    # list_search_after.append(last_id)
+                    # reqbody['search_after'] = list_search_after
 
+    dfskip.to_csv('skipped.csv',index=False)
     return dfattributesizes
 
 def getattributesizestats(df: pd.DataFrame) -> pd.DataFrame:
@@ -432,9 +468,9 @@ def getattributesizestats(df: pd.DataFrame) -> pd.DataFrame:
     :return: a DataFrame of statistics.
     """
     dfFiltered = df.loc[
-        df["type"].isin(["dict", "list"]) & ~df["path"].str.contains("[", regex=False)]
-    dfStats = dfFiltered.groupby(["index","path"], as_index=False).agg({"size": ["min", "max","mean"],
-                                                                       "attributecount": ["max"]})
+        df['type'].isin(['dict', 'list']) & ~df['path'].str.contains('[', regex=False)]
+    dfStats = dfFiltered.groupby(['index','path'], as_index=False).agg({'size': ['min', 'max','mean'],
+                                                                       'attributecount': ['max']})
     return dfStats
 
 def exportallattributes(df: pd.DataFrame):
@@ -446,27 +482,27 @@ def exportallattributes(df: pd.DataFrame):
     """
 
     # Filter the dataframe to just the attribute lists for each document.
-    dfattributes = df.loc[df["path"] == "_source"]
+    dfattributes = df.loc[df['path'] == '_source']
 
     # Get a list of indexes.
-    listindexes = dfattributes["index"].drop_duplicates().tolist()
+    listindexes = dfattributes['index'].drop_duplicates().tolist()
 
     # Export to file by index.
     for i in listindexes:
-        print (f"Exporting for index {i}....")
+        print (f'Exporting for index {i}....')
         # Filter to the attributes for the index.
-        dfindexattributes = dfattributes.loc[dfattributes["index"] == i]
+        dfindexattributes = dfattributes.loc[dfattributes['index'] == i]
 
         # Compile union of attributes.
         listattributes = []
         for index, row in dfindexattributes.iterrows():
-            listattributes = listattributes + row["attributes"]
+            listattributes = listattributes + row['attributes']
         listuniqueattributes = list(dict.fromkeys(listattributes))
 
         # Export
         sattribute = pd.Series(listuniqueattributes)
-        file = f"{i}.csv"
-        sattribute.to_csv(file, index=False, mode="w")
+        file = f'{i}.csv'
+        sattribute.to_csv(file, index=False, mode='w')
 
 def exporthitattributes(df: pd.DataFrame, filecount: int=0):
 
@@ -478,7 +514,7 @@ def exporthitattributes(df: pd.DataFrame, filecount: int=0):
     """
 
     # Filter the dataframe to just the attribute lists for each document.
-    dfattributes = df.loc[df["path"] == "_source"]
+    dfattributes = df.loc[df['path'] == '_source']
     if filecount == 0:
         filecount = len(dfattributes.index)
 
@@ -486,9 +522,9 @@ def exporthitattributes(df: pd.DataFrame, filecount: int=0):
 
     for index, row in dfattributes.iterrows():
         if i < filecount:
-            sattribute = pd.Series(row["attributes"])
-            file = f'{row["hmid"]}.csv'
-            sattribute.to_csv(file, index=False, mode="w")
+            sattribute = pd.Series(row['attributes'])
+            file = f"{row['hmid']}.csv"
+            sattribute.to_csv(file, index=False, mode='w')
         i = i + 1
 
 # ----------------
