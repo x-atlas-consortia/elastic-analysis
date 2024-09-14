@@ -197,6 +197,7 @@ def getkeysizes(es_idx: str, hmid: str, key_path: str, obj_key, obj) -> list:
 
     """
 
+    #print(f'getkeysizes: {hmid}, {key_path}, {obj_key}')
     listsizes = []
     listattributes = []
 
