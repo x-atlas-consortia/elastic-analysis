@@ -340,18 +340,17 @@ def getsearchproperty(url: str, index: str, headers: str, reqbody: str, property
     return prop
 
 
-def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
+def getattributesizes(urlbase: str, indexes: list, pagination: str) -> pd.DataFrame:
     """
     Obtains the byte sizes of every attribute in all documents in ElasticSearch.
     :param urlbase: base URL for ElasticSearch, obtained from a config file.
     :param indexes: list of indexes, obtained from a config file.
-
-    This method use "search_after" methodology to page through all the documents in ElasticSearch.
+    :param pagination: method of pagination--either "scroll" or "search_after".
 
     Refer to the getkeysizes method for a description of the columns of the hitsizes list.
     """
 
-    DEBUGHITNUM = 100000  # used in debugging to limit number of hits processed
+    DEBUGHITNUM = 1000000  # used in debugging to limit number of hits processed
 
     # Columns for output.
     colnames = ['index', 'hmid', 'path', 'type', 'size', 'attributes', 'attributecount']
@@ -361,8 +360,15 @@ def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
 
     # search query information
     headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
-    # request body for initial search queries, including count.
-    initreqbody = {'query': {'match_all': {}}}
+    # request body for initial/invariant search queries, including count.
+    initreqbody = {
+    "query": {
+        "match_all": {}
+    }
+}
+
+    # scroll context (lifetime)
+    scroll_context = '2h'
 
     for idx in indexes:
 
@@ -381,33 +387,47 @@ def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
                                       property='count')
         print(f'{idx} document count: {totalhits}')
 
+        # Add sorting to the request body.
+        initreqbody["sort"] = [{"created_timestamp": "asc"}]
+
         # Loop through pages of results until no more hits are returned.
         # (or until the maximum number of hits per DEBUGHITNUM is processed)
         with tqdm(total=totalhits) as pbar:
 
             while numhits > 0 and ihit < DEBUGHITNUM:
 
-                # EXECUTE SCROLLING SEARCH ENDPOINT.
+                # EXECUTE SEARCH ENDPOINT.
                 # Scrolling searches use two types of calls:
                 # 1. The initial call establishes the response and obtains a scrolling key.
                 # 2. Subsequent calls use the scrolling key.
                 if icall == 0:
-                    # initial scrolling search url
-                    url = f'{urlbase}{idx}/_search?scroll=1m'
+                    if pagination == 'scroll':
+                        # initial scrolling search url
+                        url = f'{urlbase}{idx}/_search?scroll={scroll_context}'
+                    else:
+                        # invariant search url
+                        url = f'{urlbase}{idx}/_search'
                     req = initreqbody
                 else:
-                    # subsequent scrolling search url
-                    url = f'{urlbase}_search/scroll'
-                    # The crolling request body will be defined in the inital call.
-                    req = scrollreqbody
+                    if pagination == 'scroll':
+                        # subsequent scrolling search url
+                        url = f'{urlbase}_search/scroll'
+                        # The crolling request body will be defined in the inital call.
+                        req = scrollreqbody
 
                 response = requests.post(url=url, headers=headers, json=req)
 
-                if response.status_code != 200:
-                    print(f'Error executing search endpoint:{response}')
+                if response.status_code == 404:
+                    # The scroll context expired.
+                    if pagination == 'scroll':
+                        print(f'404 error. Increase the length of the scroll context to a value above {scroll_context}.')
                     exit(1)
 
-                if icall == 0:
+                if response.status_code != 200:
+                    print('Error executing search endpoint:')
+                    exit(1)
+
+                if icall == 0 and pagination == 'scroll':
                     # This is the initial call. Get scroll key to be used in subsequent calls.
                     scroll_id = response.json().get('_scroll_id')
                     # Build the request body to be used on all search endpoints after the initial one.
@@ -427,6 +447,7 @@ def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
                     if ihit == DEBUGHITNUM:
                         break
                     entity_type = hit.get('_source').get('entity_type')
+                    #print(hit.get('_source').get('hubmap_id'))
                     if entity_type == 'Upload':
                         # In general, upload entities contain large numbers of datasets, and
                         # are too large to process.
@@ -443,17 +464,19 @@ def getattributesizes(urlbase: str, indexes: list) -> pd.DataFrame:
                     # Advance the progress bar.
                     pbar.update(1)
 
-                # If using search_after methodology instead of scrolling.
-                # if numhits == 0:
-                    # Re-initialize the request body.
-                    # del reqbody['search_after']
-                # else:
-                    # Build pagination for searches after the first--i.e., a search_after key.
-                    # last_hit = hits[numhits-1]
-                    # last_id = last_hit.get('sort')[0]
-                    # list_search_after = []
-                    # list_search_after.append(last_id)
-                    # reqbody['search_after'] = list_search_after
+                # If using search_after methodology instead of scrolling, increment search_after
+                # parameters.
+                if pagination != 'scroll':
+                    if numhits == 0:
+                        # Re-initialize the request body.
+                        del initreqbody['search_after']
+                    else:
+                        # Build pagination for searches after the first--i.e., a search_after key.
+                        last_hit = hits[numhits-1]
+                        last_id = last_hit.get('sort')[0]
+                        list_search_after = []
+                        list_search_after.append(last_id)
+                        initreqbody['search_after'] = list_search_after
 
     dfskip.to_csv('skipped.csv',index=False)
     return dfattributesizes
@@ -544,7 +567,7 @@ indexids = getindexids(myconfig=elastic_config)
 #buildattributelist(urlbase=baseurl, indexes=indexids)
 
 print('Obtaining sizes of documents....')
-dfSizes = getattributesizes(urlbase=baseurl,indexes=indexids)
+dfSizes = getattributesizes(urlbase=baseurl,indexes=indexids, pagination='scroll')
 
 print('Calculating descriptive size statistics...')
 dfstats = getattributesizestats(df=dfSizes)
